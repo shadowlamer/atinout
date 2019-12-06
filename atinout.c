@@ -31,28 +31,40 @@
 #include <stdbool.h>
 #include <errno.h>
 #include <getopt.h>
+#include <signal.h>
+#include <unistd.h>
 
 #define MAX_LINE_LENGTH (4 * 1024)
 static char buf[MAX_LINE_LENGTH];
 
+static int timeout = 0;
+static bool need_flush = false;
+char *wait_for_string = NULL;
+
 static struct option long_options[] = {
     {"help", no_argument, NULL, 'h'},
     {"version", no_argument, NULL, 'V'},
+    {"flush", no_argument, NULL, 'f'},
+    {"timeout", required_argument, NULL,'t'},
+    {"wait", required_argument, NULL,'w'},
     {"usage", no_argument, NULL, 0},
     {NULL, 0, NULL, 0}
 };
-static const char *short_options = "hV";
+static const char *short_options = "hVf";
 
 static void usage(const char * const argv0)
 {
-    printf("Usage: %s <input_file> <modem_device> <output_file>\n", argv0);
+    printf("Usage: %s <options> <input_file> <modem_device> <output_file>\n", argv0);
     printf("\n");
     printf("\t<input_file> is a file with AT commands to be executed. Value '-' means standard input.\n");
     printf("\t<modem_device> is the device file for the modem (e.g. /dev/ttyACM0, /dev/ttyS0, etc).\n");
     printf("\t<output_file> is a file the responses to the AT commands are saved. Value '-' means standard output.\n");
     printf("\n");
-    printf("In addition the program supports the following options as the only argument:\n");
+    printf("In addition the program supports the following options:\n");
     printf("\n");
+    printf("\t-f|--flush           - Flush modem device first\n");
+    printf("\t--timeout=<seconds>  - Timeout after <seconds>\n");
+    printf("\t--wait=<string>      - Wait for the answer starting with the given string\n");
     printf("\t-h|--help\n");
     printf("\t-V|--version\n");
     printf("\t--usage\n");
@@ -111,49 +123,73 @@ static void strip_cr(char *s)
     *to = '\0';
 }
 
+void handle_sigalrm(int signal) {
+    if (signal == SIGALRM) {
+        exit(EXIT_FAILURE);
+    }
+}
+static void armAlarm(int seconds) {
+    struct sigaction sa;
+    sigset_t mask;
+    sa.sa_handler = &handle_sigalrm; // Intercept and ignore SIGALRM
+    sa.sa_flags = SA_RESETHAND; // Remove the handler after first signal
+    sigfillset(&sa.sa_mask);
+    sigaction(SIGALRM, &sa, NULL);
+    sigprocmask(0, NULL, &mask);
+    sigdelset(&mask, SIGALRM);
+    alarm(seconds);
+}
+
 static bool is_final_result(const char * const response)
 {
 #define STARTS_WITH(a, b) ( strncmp((a), (b), strlen(b)) == 0)
-    switch (response[0]) {
-        case '+':
-            if (STARTS_WITH(&response[1], "CME ERROR:")) {
-                return true;
-            }
-            if (STARTS_WITH(&response[1], "CMS ERROR:")) {
-                return true;
-            }
-            return false;
-        case 'B':
-            if (strcmp(&response[1], "USY\n") == 0) {
-                return true;
-            }
+    if (wait_for_string != NULL) {
+        if (STARTS_WITH(&response[0], wait_for_string)) {
+            return true;
+        }
+    } else {
+        switch (response[0]) {
+            case '+':
+                if (STARTS_WITH(&response[1], "CME ERROR:")) {
+                    return true;
+                }
+                if (STARTS_WITH(&response[1], "CMS ERROR:")) {
+                    return true;
+                }
+                return false;
+            case 'B':
+                if (strcmp(&response[1], "USY\n") == 0) {
+                    return true;
+                }
 
-            return false;
+                return false;
 
-        case 'E':
-            if (strcmp(&response[1], "RROR\n") == 0) {
-                return true;
-            }
-            return false;
-        case 'N':
-            if (strcmp(&response[1], "O ANSWER\n") == 0) {
-                return true;
-            }
-            if (strcmp(&response[1], "O CARRIER\n") == 0) {
-                return true;
-            }
-            if (strcmp(&response[1], "O DIALTONE\n") == 0) {
-                return true;
-            }
-            return false;
-        case 'O':
-            if (strcmp(&response[1], "K\n") == 0) {
-                return true;
-            }
-            // fallthrough
-        default:
-            return false;
+            case 'E':
+                if (strcmp(&response[1], "RROR\n") == 0) {
+                    return true;
+                }
+                return false;
+            case 'N':
+                if (strcmp(&response[1], "O ANSWER\n") == 0) {
+                    return true;
+                }
+                if (strcmp(&response[1], "O CARRIER\n") == 0) {
+                    return true;
+                }
+                if (strcmp(&response[1], "O DIALTONE\n") == 0) {
+                    return true;
+                }
+                return false;
+            case 'O':
+                if (strcmp(&response[1], "K\n") == 0) {
+                    return true;
+                }
+                // fallthrough
+            default:
+                return false;
+        }
     }
+    return false;
 }
 
 int main(int argc, char *argv[])
@@ -187,6 +223,17 @@ int main(int argc, char *argv[])
                     usage(argv[0]);
                     return EXIT_SUCCESS;
                 }
+                break;
+            case 'f':
+                need_flush = true;
+                break;
+            case 't':
+                if (optarg != NULL ) {
+                    timeout = atoi(optarg);
+                }
+                break;
+            case 'w':
+                wait_for_string = optarg;
                 break;
             case '?':
                 break;
@@ -229,6 +276,12 @@ int main(int argc, char *argv[])
             return EXIT_FAILURE;
         }
     }
+
+    if (need_flush) {
+      fflush(modem);
+    }
+
+    armAlarm(timeout);
 
     while ((line = fgets(buf, (int)sizeof(buf), atcmds)) != NULL) {
         success = tr_lf_cr(line);

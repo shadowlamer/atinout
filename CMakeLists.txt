@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.0)
 
 set(TARGET atinout)
-set(TARGET_VERSION "0.9.1")
+set(TARGET_VERSION "0.9.2")
 
 project(${TARGET})
 
